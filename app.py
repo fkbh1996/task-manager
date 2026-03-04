@@ -8,11 +8,9 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- Config ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-print(f"Claude key loaded: {bool(CLAUDE_API_KEY)}, length: {len(CLAUDE_API_KEY)}")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -21,16 +19,41 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
 
 resend.api_key = RESEND_API_KEY
 
-supabase = None
+print(f"Supabase URL: [{SUPABASE_URL}]")
+print(f"Supabase key length: {len(SUPABASE_KEY)}")
 
-def get_supabase():
-    global supabase
-    if supabase is None and SUPABASE_URL and SUPABASE_KEY:
-        from supabase import create_client
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    return supabase
+def supabase_insert(table, data):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+    resp = requests.post(url, headers=headers, json=data)
+    print(f"Supabase insert: {resp.status_code} {resp.text[:300]}")
+    return resp
 
-# --- Claude Task Extraction (direct HTTP) ---
+def supabase_select(table, filters):
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{filters}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    resp = requests.get(url, headers=headers)
+    return resp.json()
+
+def supabase_update(table, filters, data):
+    url = f"{SUPABASE_URL}/rest/v1/{table}?{filters}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+    resp = requests.patch(url, headers=headers, json=data)
+    return resp
+
 def extract_task_from_text(text, source):
     prompt = f"""You are a task extraction assistant. Extract the following from the message below:
 - task_description: What needs to be done
@@ -55,7 +78,7 @@ Message:
         "messages": [{"role": "user", "content": prompt}]
     }
     resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-    print(f"Claude API response: {resp.status_code} {resp.text[:500]}")
+    print(f"Claude API response: {resp.status_code}")
     resp_data = resp.json()
     raw = resp_data["content"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
@@ -66,7 +89,6 @@ def extract_task_from_audio(audio_url, mime_type, source):
     audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
     audio_bytes = audio_response.content
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-
     prompt = """You are a task extraction assistant. Listen to this audio and extract:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
@@ -93,7 +115,7 @@ Respond ONLY in valid JSON format like this:
         }]
     }
     resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-    print(f"Claude audio API response: {resp.status_code} {resp.text[:500]}")
+    print(f"Claude audio API response: {resp.status_code}")
     resp_data = resp.json()
     raw = resp_data["content"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
@@ -101,11 +123,10 @@ Respond ONLY in valid JSON format like this:
     return data
 
 def save_task(raw_input, source, data):
-    db = get_supabase()
     deadline = data.get("deadline")
     if deadline and deadline.lower() == "null":
         deadline = None
-    db.table("tasks").insert({
+    supabase_insert("tasks", {
         "raw_input": raw_input,
         "source": source,
         "task_description": data.get("task_description"),
@@ -113,9 +134,8 @@ def save_task(raw_input, source, data):
         "owner_contact": data.get("owner_contact"),
         "deadline": deadline,
         "reminder_sent": False
-    }).execute()
+    })
 
-# --- WhatsApp Webhook ---
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -162,7 +182,6 @@ def whatsapp_webhook():
 
     return jsonify({"status": "ok"}), 200
 
-# --- Email Webhook ---
 @app.route("/email", methods=["POST"])
 def email_webhook():
     try:
@@ -179,7 +198,6 @@ def email_webhook():
         print(f"Email error: {e}")
     return jsonify({"status": "ok"}), 200
 
-# --- Send Reminders ---
 def send_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_ID}/messages"
     headers = {
@@ -203,12 +221,9 @@ def send_email_reminder(to_email, task_desc):
     })
 
 def check_and_send_reminders():
-    db = get_supabase()
-    if db is None:
-        return
     today = date.today().isoformat()
-    result = db.table("tasks").select("*").eq("deadline", today).eq("reminder_sent", False).execute()
-    for task in result.data:
+    tasks = supabase_select("tasks", f"deadline=eq.{today}&reminder_sent=eq.false")
+    for task in tasks:
         contact = task.get("owner_contact", "")
         desc = task.get("task_description", "You have a task due today.")
         msg = f"Reminder: {desc} (Deadline: today)"
@@ -222,9 +237,8 @@ def check_and_send_reminders():
                 send_whatsapp_message(contact, msg)
             except Exception as e:
                 print(f"WhatsApp send error: {e}")
-        db.table("tasks").update({"reminder_sent": True}).eq("id", task["id"]).execute()
+        supabase_update("tasks", f"id=eq.{task['id']}", {"reminder_sent": True})
 
-# --- Scheduler ---
 def start_scheduler():
     from apscheduler.schedulers.background import BackgroundScheduler
     scheduler = BackgroundScheduler()
@@ -233,7 +247,6 @@ def start_scheduler():
 
 start_scheduler()
 
-# --- Health Check ---
 @app.route("/", methods=["GET"])
 def home():
     return "Task Manager is running!", 200
