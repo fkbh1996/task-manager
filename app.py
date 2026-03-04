@@ -135,8 +135,9 @@ def whatsapp_webhook():
             try:
                 data = extract_task_from_text(text, "whatsapp")
             except Exception as ex:
-                print(f"Claude API error: {type(ex).__name__}: {ex}")
-                raise            if data.get("owner_contact") == "Unknown":
+                print(f"Claude API detail: {type(ex).__name__}: {ex}")
+                raise
+            if data.get("owner_contact") == "Unknown":
                 data["owner_contact"] = sender
             save_task(text, "whatsapp", data)
 
