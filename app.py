@@ -53,7 +53,7 @@ Message:
 {text}
 """
     response = client.models.generate_content(
-        model="gemini-1.5-pro",
+        model="gemini-2.0-flash",
         contents=prompt
     )
     raw = response.text.strip()
@@ -77,7 +77,7 @@ Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
 """
     response = client.models.generate_content(
-        model="gemini-1.5-pro",
+        model="gemini-2.0-flash",
         contents=[
             {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
             prompt
