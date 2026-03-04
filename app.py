@@ -11,7 +11,7 @@ app = Flask(__name__)
 # --- Config ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -21,7 +21,7 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
 resend.api_key = RESEND_API_KEY
 
 supabase = None
-gemini_client = None
+claude_client = None
 
 def get_supabase():
     global supabase
@@ -30,16 +30,16 @@ def get_supabase():
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return supabase
 
-def get_gemini():
-    global gemini_client
-    if gemini_client is None and GEMINI_API_KEY:
-        from google import genai
-        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    return gemini_client
+def get_claude():
+    global claude_client
+    if claude_client is None and CLAUDE_API_KEY:
+        from anthropic import Anthropic
+        claude_client = Anthropic(api_key=CLAUDE_API_KEY)
+    return claude_client
 
-# --- Gemini Task Extraction ---
+# --- Claude Task Extraction ---
 def extract_task_from_text(text, source):
-    client = get_gemini()
+    client = get_claude()
     prompt = f"""You are a task extraction assistant. Extract the following from the message below:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
@@ -52,17 +52,18 @@ Respond ONLY in valid JSON format like this:
 Message:
 {text}
 """
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        messages=[{"role": "user", "content": prompt}]
     )
-    raw = response.text.strip()
+    raw = response.content[0].text.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
 
 def extract_task_from_audio(audio_url, mime_type, source):
-    client = get_gemini()
+    client = get_claude()
     audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
     audio_bytes = audio_response.content
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -76,14 +77,18 @@ def extract_task_from_audio(audio_url, mime_type, source):
 Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
 """
-    response = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=[
-            {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
-            prompt
-        ]
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=500,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "document", "source": {"type": "base64", "media_type": mime_type, "data": audio_b64}}
+            ]
+        }]
     )
-    raw = response.text.strip()
+    raw = response.content[0].text.strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
@@ -150,7 +155,7 @@ def whatsapp_webhook():
 
     return jsonify({"status": "ok"}), 200
 
-# --- Email Webhook (Resend or forwarded) ---
+# --- Email Webhook ---
 @app.route("/email", methods=["POST"])
 def email_webhook():
     try:
