@@ -22,7 +22,6 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
 resend.api_key = RESEND_API_KEY
 
 supabase = None
-claude_client = None
 
 def get_supabase():
     global supabase
@@ -31,16 +30,8 @@ def get_supabase():
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     return supabase
 
-def get_claude():
-    global claude_client
-    if claude_client is None and CLAUDE_API_KEY:
-        from anthropic import Anthropic
-        claude_client = Anthropic(api_key=CLAUDE_API_KEY)
-    return claude_client
-
-# --- Claude Task Extraction ---
+# --- Claude Task Extraction (direct HTTP) ---
 def extract_task_from_text(text, source):
-    client = get_claude()
     prompt = f"""You are a task extraction assistant. Extract the following from the message below:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
@@ -53,18 +44,25 @@ Respond ONLY in valid JSON format like this:
 Message:
 {text}
 """
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    raw = response.content[0].text.strip()
+    headers = {
+        "x-api-key": CLAUDE_API_KEY,
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01"
+    }
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 500,
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+    print(f"Claude API response: {resp.status_code} {resp.text[:500]}")
+    resp_data = resp.json()
+    raw = resp_data["content"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
 
 def extract_task_from_audio(audio_url, mime_type, source):
-    client = get_claude()
     audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
     audio_bytes = audio_response.content
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -78,18 +76,26 @@ def extract_task_from_audio(audio_url, mime_type, source):
 Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
 """
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=500,
-        messages=[{
+    headers = {
+        "x-api-key": CLAUDE_API_KEY,
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01"
+    }
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 500,
+        "messages": [{
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
                 {"type": "document", "source": {"type": "base64", "media_type": mime_type, "data": audio_b64}}
             ]
         }]
-    )
-    raw = response.content[0].text.strip()
+    }
+    resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+    print(f"Claude audio API response: {resp.status_code} {resp.text[:500]}")
+    resp_data = resp.json()
+    raw = resp_data["content"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
@@ -132,11 +138,7 @@ def whatsapp_webhook():
 
         if msg_type == "text":
             text = message["text"]["body"]
-            try:
-                data = extract_task_from_text(text, "whatsapp")
-            except Exception as ex:
-                print(f"Claude API detail: {type(ex).__name__}: {ex}")
-                raise
+            data = extract_task_from_text(text, "whatsapp")
             if data.get("owner_contact") == "Unknown":
                 data["owner_contact"] = sender
             save_task(text, "whatsapp", data)
