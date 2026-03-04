@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import base64
+import resend
 from datetime import datetime, date
 from flask import Flask, request, jsonify
 
@@ -14,8 +15,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
+
+resend.api_key = RESEND_API_KEY
 
 supabase = None
 gemini_client = None
@@ -147,13 +150,14 @@ def whatsapp_webhook():
 
     return jsonify({"status": "ok"}), 200
 
-# --- Email Webhook (SendGrid Inbound Parse) ---
+# --- Email Webhook (Resend or forwarded) ---
 @app.route("/email", methods=["POST"])
 def email_webhook():
     try:
-        sender = request.form.get("from", "")
-        subject = request.form.get("subject", "")
-        body_text = request.form.get("text", "")
+        body = request.get_json()
+        sender = body.get("from", "")
+        subject = body.get("subject", "")
+        body_text = body.get("text", "")
         full_text = f"Subject: {subject}\n\n{body_text}"
         data = extract_task_from_text(full_text, "email")
         if data.get("owner_contact") == "Unknown":
@@ -179,16 +183,12 @@ def send_whatsapp_message(phone, message):
     requests.post(url, headers=headers, json=payload)
 
 def send_email_reminder(to_email, task_desc):
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail
-    message = Mail(
-        from_email=SENDER_EMAIL,
-        to_emails=to_email,
-        subject="Task Reminder",
-        plain_text_content=f"Reminder: {task_desc}"
-    )
-    sg = SendGridAPIClient(SENDGRID_API_KEY)
-    sg.send(message)
+    resend.Emails.send({
+        "from": SENDER_EMAIL,
+        "to": [to_email],
+        "subject": "Task Reminder",
+        "text": f"Reminder: {task_desc}"
+    })
 
 def check_and_send_reminders():
     db = get_supabase()
