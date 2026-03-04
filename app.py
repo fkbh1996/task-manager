@@ -4,29 +4,39 @@ import requests
 import base64
 from datetime import datetime, date
 from flask import Flask, request, jsonify
-from supabase import create_client
-from google import genai
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
-from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
 # --- Config ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID")
-VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
-SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY")
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
+SENDGRID_API_KEY = os.environ.get("SENDGRID_API_KEY", "")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+supabase = None
+gemini_client = None
+
+def get_supabase():
+    global supabase
+    if supabase is None and SUPABASE_URL and SUPABASE_KEY:
+        from supabase import create_client
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return supabase
+
+def get_gemini():
+    global gemini_client
+    if gemini_client is None and GEMINI_API_KEY:
+        from google import genai
+        gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return gemini_client
 
 # --- Gemini Task Extraction ---
 def extract_task_from_text(text, source):
+    client = get_gemini()
     prompt = f"""You are a task extraction assistant. Extract the following from the message below:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
@@ -39,7 +49,7 @@ Respond ONLY in valid JSON format like this:
 Message:
 {text}
 """
-    response = gemini_client.models.generate_content(
+    response = client.models.generate_content(
         model="gemini-1.5-pro",
         contents=prompt
     )
@@ -49,6 +59,7 @@ Message:
     return data
 
 def extract_task_from_audio(audio_url, mime_type, source):
+    client = get_gemini()
     audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
     audio_bytes = audio_response.content
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -62,7 +73,7 @@ def extract_task_from_audio(audio_url, mime_type, source):
 Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
 """
-    response = gemini_client.models.generate_content(
+    response = client.models.generate_content(
         model="gemini-1.5-pro",
         contents=[
             {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
@@ -75,10 +86,11 @@ Respond ONLY in valid JSON format like this:
     return data
 
 def save_task(raw_input, source, data):
+    db = get_supabase()
     deadline = data.get("deadline")
     if deadline and deadline.lower() == "null":
         deadline = None
-    supabase.table("tasks").insert({
+    db.table("tasks").insert({
         "raw_input": raw_input,
         "source": source,
         "task_description": data.get("task_description"),
@@ -167,6 +179,8 @@ def send_whatsapp_message(phone, message):
     requests.post(url, headers=headers, json=payload)
 
 def send_email_reminder(to_email, task_desc):
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail
     message = Mail(
         from_email=SENDER_EMAIL,
         to_emails=to_email,
@@ -177,12 +191,15 @@ def send_email_reminder(to_email, task_desc):
     sg.send(message)
 
 def check_and_send_reminders():
+    db = get_supabase()
+    if db is None:
+        return
     today = date.today().isoformat()
-    result = supabase.table("tasks").select("*").eq("deadline", today).eq("reminder_sent", False).execute()
+    result = db.table("tasks").select("*").eq("deadline", today).eq("reminder_sent", False).execute()
     for task in result.data:
         contact = task.get("owner_contact", "")
         desc = task.get("task_description", "You have a task due today.")
-        msg = f"⏰ Reminder: {desc} (Deadline: today)"
+        msg = f"Reminder: {desc} (Deadline: today)"
         if "@" in contact:
             try:
                 send_email_reminder(contact, msg)
@@ -193,12 +210,16 @@ def check_and_send_reminders():
                 send_whatsapp_message(contact, msg)
             except Exception as e:
                 print(f"WhatsApp send error: {e}")
-        supabase.table("tasks").update({"reminder_sent": True}).eq("id", task["id"]).execute()
+        db.table("tasks").update({"reminder_sent": True}).eq("id", task["id"]).execute()
 
 # --- Scheduler ---
-scheduler = BackgroundScheduler()
-scheduler.add_job(check_and_send_reminders, "interval", hours=1)
-scheduler.start()
+def start_scheduler():
+    from apscheduler.schedulers.background import BackgroundScheduler
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(check_and_send_reminders, "interval", hours=1)
+    scheduler.start()
+
+start_scheduler()
 
 # --- Health Check ---
 @app.route("/", methods=["GET"])
