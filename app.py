@@ -19,9 +19,6 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
 
 resend.api_key = RESEND_API_KEY
 
-print(f"Supabase URL: [{SUPABASE_URL}]")
-print(f"Supabase key length: {len(SUPABASE_KEY)}")
-
 def supabase_insert(table, data):
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     headers = {
@@ -31,7 +28,7 @@ def supabase_insert(table, data):
         "Prefer": "return=representation"
     }
     resp = requests.post(url, headers=headers, json=data)
-    print(f"Supabase insert: {resp.status_code} {resp.text[:300]}")
+    print(f"Supabase insert: {resp.status_code}")
     return resp
 
 def supabase_select(table, filters):
@@ -85,15 +82,14 @@ Message:
     data = json.loads(raw)
     return data
 
-def extract_task_from_audio(audio_url, mime_type, source):
-    audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
-    audio_bytes = audio_response.content
-    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+def extract_task_from_audio(audio_b64, mime_type, source):
     prompt = """You are a task extraction assistant. Listen to this audio and extract:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
 - owner_contact: Their phone number or email (if mentioned, otherwise "Unknown")
 - deadline: The deadline date in YYYY-MM-DD format (if mentioned, otherwise null)
+
+The audio may be in any language. Translate and extract accordingly.
 
 Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
@@ -165,14 +161,19 @@ def whatsapp_webhook():
 
         elif msg_type == "audio":
             audio_id = message["audio"]["id"]
+            print(f"Audio ID: {audio_id}")
             media_url_resp = requests.get(
-                f"https://graph.facebook.com/v21.0/{audio_id}",
+                f"https://graph.facebook.com/v22.0/{audio_id}",
                 headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             )
+            print(f"Media URL response: {media_url_resp.status_code} {media_url_resp.text[:500]}")
             media_info = media_url_resp.json()
             audio_url = media_info["url"]
             mime_type = media_info.get("mime_type", "audio/ogg")
-            data = extract_task_from_audio(audio_url, mime_type, "whatsapp")
+            audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
+            print(f"Audio download: {audio_response.status_code}, size: {len(audio_response.content)}")
+            audio_b64 = base64.b64encode(audio_response.content).decode("utf-8")
+            data = extract_task_from_audio(audio_b64, mime_type, "whatsapp")
             if data.get("owner_contact") == "Unknown":
                 data["owner_contact"] = sender
             save_task("(voice note)", "whatsapp", data)
@@ -200,7 +201,7 @@ def email_webhook():
     return jsonify({"status": "ok"}), 200
 
 def send_whatsapp_message(phone, message):
-    url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_ID}/messages"
+    url = f"https://graph.facebook.com/v22.0/{WHATSAPP_PHONE_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
         "Content-Type": "application/json"
