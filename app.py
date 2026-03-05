@@ -11,6 +11,7 @@ app = Flask(__name__)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -94,26 +95,19 @@ The audio may be in any language. Translate and extract accordingly.
 Respond ONLY in valid JSON format like this:
 {"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
 """
-    headers = {
-        "x-api-key": CLAUDE_API_KEY,
-        "content-type": "application/json",
-        "anthropic-version": "2023-06-01"
-    }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 500,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "document", "source": {"type": "base64", "media_type": mime_type, "data": audio_b64}}
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
+                {"text": prompt}
             ]
         }]
     }
-    resp = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-    print(f"Claude audio API response: {resp.status_code}")
+    resp = requests.post(url, json=payload)
+    print(f"Gemini audio API response: {resp.status_code}")
     resp_data = resp.json()
-    raw = resp_data["content"][0]["text"].strip()
+    raw = resp_data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
@@ -166,7 +160,7 @@ def whatsapp_webhook():
                 f"https://graph.facebook.com/v22.0/{audio_id}",
                 headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
             )
-            print(f"Media URL response: {media_url_resp.status_code} {media_url_resp.text[:500]}")
+            print(f"Media URL response: {media_url_resp.status_code}")
             media_info = media_url_resp.json()
             audio_url = media_info["url"]
             mime_type = media_info.get("mime_type", "audio/ogg")
