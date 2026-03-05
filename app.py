@@ -186,9 +186,10 @@ def whatsapp_webhook():
 def email_webhook():
     try:
         body = request.get_json()
-        sender = body.get("from", "")
-        subject = body.get("subject", "")
-        body_text = body.get("text", "")
+        headers_data = body.get("headers", {})
+        sender = headers_data.get("from", "")
+        subject = headers_data.get("subject", "")
+        body_text = body.get("plain", "")
         full_text = f"Subject: {subject}\n\n{body_text}"
         data = extract_task_from_text(full_text, "email")
         if data.get("owner_contact") == "Unknown":
