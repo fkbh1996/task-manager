@@ -11,7 +11,7 @@ app = Flask(__name__)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 CLAUDE_API_KEY = os.environ.get("CLAUDE_API_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_ID = os.environ.get("WHATSAPP_PHONE_ID", "")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
@@ -52,12 +52,29 @@ def supabase_update(table, filters, data):
     resp = requests.patch(url, headers=headers, json=data)
     return resp
 
+def transcribe_audio(audio_bytes, mime_type):
+    files = {
+        "file": ("audio.ogg", audio_bytes, mime_type),
+    }
+    data = {
+        "model": "whisper-large-v3",
+    }
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+    }
+    resp = requests.post("https://api.groq.com/openai/v1/audio/transcriptions", headers=headers, files=files, data=data)
+    print(f"Groq transcription response: {resp.status_code}")
+    result = resp.json()
+    return result.get("text", "")
+
 def extract_task_from_text(text, source):
     prompt = f"""You are a task extraction assistant. Extract the following from the message below:
 - task_description: What needs to be done
 - owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
 - owner_contact: Their phone number or email (if mentioned, otherwise "Unknown")
 - deadline: The deadline date in YYYY-MM-DD format (if mentioned, otherwise null)
+
+The message may be in any language. Translate and extract accordingly.
 
 Respond ONLY in valid JSON format like this:
 {{"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}}
@@ -79,35 +96,6 @@ Message:
     print(f"Claude API response: {resp.status_code}")
     resp_data = resp.json()
     raw = resp_data["content"][0]["text"].strip()
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    data = json.loads(raw)
-    return data
-
-def extract_task_from_audio(audio_b64, mime_type, source):
-    prompt = """You are a task extraction assistant. Listen to this audio and extract:
-- task_description: What needs to be done
-- owner_name: Who is responsible (if mentioned, otherwise "Unassigned")
-- owner_contact: Their phone number or email (if mentioned, otherwise "Unknown")
-- deadline: The deadline date in YYYY-MM-DD format (if mentioned, otherwise null)
-
-The audio may be in any language. Translate and extract accordingly.
-
-Respond ONLY in valid JSON format like this:
-{"task_description": "...", "owner_name": "...", "owner_contact": "...", "deadline": "..."}
-"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": mime_type, "data": audio_b64}},
-                {"text": prompt}
-            ]
-        }]
-    }
-    resp = requests.post(url, json=payload)
-    print(f"Gemini audio API response: {resp.status_code}")
-    resp_data = resp.json()
-    raw = resp_data["candidates"][0]["content"]["parts"][0]["text"].strip()
     raw = raw.replace("```json", "").replace("```", "").strip()
     data = json.loads(raw)
     return data
@@ -166,11 +154,12 @@ def whatsapp_webhook():
             mime_type = media_info.get("mime_type", "audio/ogg")
             audio_response = requests.get(audio_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"})
             print(f"Audio download: {audio_response.status_code}, size: {len(audio_response.content)}")
-            audio_b64 = base64.b64encode(audio_response.content).decode("utf-8")
-            data = extract_task_from_audio(audio_b64, mime_type, "whatsapp")
+            transcript = transcribe_audio(audio_response.content, mime_type)
+            print(f"Transcript: {transcript}")
+            data = extract_task_from_text(transcript, "whatsapp")
             if data.get("owner_contact") == "Unknown":
                 data["owner_contact"] = sender
-            save_task("(voice note)", "whatsapp", data)
+            save_task(f"(voice note) {transcript}", "whatsapp", data)
 
     except Exception as e:
         print(f"WhatsApp error: {e}")
